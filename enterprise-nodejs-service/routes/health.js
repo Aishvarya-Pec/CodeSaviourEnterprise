@@ -137,15 +137,12 @@ router.get('/database', catchAsync(async (req, res) => {
     message: dbHealth.message,
     timestamp: new Date().toISOString(),
     responseTime: `${responseTime}ms`,
-    connection: connectionStatus,
-    details: dbHealth.details,
+    details: dbHealth,
     statistics: dbStats ? {
-      collections: dbStats.collections,
-      documents: dbStats.objects,
-      dataSize: `${Math.round(dbStats.dataSize / 1024 / 1024 * 100) / 100} MB`,
-      storageSize: `${Math.round(dbStats.storageSize / 1024 / 1024 * 100) / 100} MB`,
-      indexSize: `${Math.round(dbStats.indexSize / 1024 / 1024 * 100) / 100} MB`,
-      indexes: dbStats.indexes
+      database: dbStats.database_name,
+      version: dbStats.version,
+      databaseSizeBytes: dbStats.database_size,
+      pool: dbStats.pool_stats
     } : null
   };
 
@@ -153,7 +150,7 @@ router.get('/database', catchAsync(async (req, res) => {
   
   res.status(statusCode).json({
     success: dbHealth.status === 'connected',
-    message: dbHealth.message,
+    message: dbHealth.message || (dbHealth.status === 'connected' ? 'Database is healthy' : 'Database is not connected'),
     data: healthCheck
   });
 }));
@@ -164,7 +161,7 @@ router.get('/database', catchAsync(async (req, res) => {
  * @access  Public
  */
 router.get('/readiness', catchAsync(async (req, res) => {
-  const dbHealth = await db.healthCheck();
+  const dbHealth = await databaseManager.healthCheck();
   
   // Service is ready if database is connected
   const isReady = dbHealth.status === 'connected';
@@ -243,7 +240,7 @@ router.get('/metrics', catchAsync(async (req, res) => {
       uptime: require('os').uptime(),
       cpus: require('os').cpus().length
     },
-    database: db.getConnectionStatus()
+    database: await databaseManager.healthCheck()
   };
 
   res.json({

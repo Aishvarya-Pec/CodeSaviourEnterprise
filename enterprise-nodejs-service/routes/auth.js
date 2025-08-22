@@ -1,6 +1,8 @@
 const express = require('express');
 const { body } = require('express-validator');
 const User = require('../models/User');
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const { 
   generateToken, 
   generateTokens, 
@@ -73,21 +75,18 @@ router.post('/register', registerValidation, handleValidationResult, catchAsync(
     throw createAppError('User with this email already exists', 409, 'USER_EXISTS', true);
   }
 
-  // Create new user (password will be hashed by pre-save middleware)
-  const user = new User({
+  // Create new user (hashing handled in model)
+  const user = await User.create({
     email,
     password,
-    role: 'user',
-    isActive: true
+    role: 'user'
   });
 
-  await user.save();
-
-  // Generate JWT token
-  const token = generateToken(user);
+  // Generate JWT tokens
+  const tokens = generateTokens(user);
 
   // Log successful registration
-  logger.logAuth('REGISTER', email, true, { userId: user._id }, req);
+  logger.logAuth('REGISTER', email, true, { userId: user.id }, req);
 
   // Return success response (password is excluded by toJSON transform)
   res.status(201).json({
@@ -95,8 +94,10 @@ router.post('/register', registerValidation, handleValidationResult, catchAsync(
     message: 'User registered successfully',
     data: {
       user,
-      token,
-      expiresIn: process.env.JWT_EXPIRES_IN || '15m'
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresIn: tokens.expiresIn,
+      tokenType: 'Bearer'
     }
   });
 }));
@@ -109,8 +110,8 @@ router.post('/register', registerValidation, handleValidationResult, catchAsync(
 router.post('/login', loginValidation, handleValidationResult, catchAsync(async (req, res) => {
   const { email, password } = req.body;
 
-  // Find user by email (include password for comparison)
-  const user = await User.findByEmail(email).select('+password');
+  // Find user by email
+  const user = await User.findByEmail(email);
   
   if (!user) {
     logger.logAuth('LOGIN_ATTEMPT', email, false, { reason: 'User not found' }, req);
@@ -118,8 +119,8 @@ router.post('/login', loginValidation, handleValidationResult, catchAsync(async 
   }
 
   // Check if account is locked
-  if (user.isLocked) {
-    const lockTimeRemaining = Math.ceil((user.lockUntil - Date.now()) / (1000 * 60));
+  if (user.isAccountLocked()) {
+    const lockTimeRemaining = user.locked_until ? Math.ceil((new Date(user.locked_until).getTime() - Date.now()) / (1000 * 60)) : 15;
     logger.logAuth('LOGIN_ATTEMPT', email, false, { 
       reason: 'Account locked',
       lockTimeRemaining: `${lockTimeRemaining} minutes`
@@ -134,7 +135,7 @@ router.post('/login', loginValidation, handleValidationResult, catchAsync(async 
   }
 
   // Check if account is active
-  if (!user.isActive) {
+  if (!user.is_active) {
     logger.logAuth('LOGIN_ATTEMPT', email, false, { reason: 'Account inactive' }, req);
     throw createAppError('Account is inactive. Please contact support.', 401, 'ACCOUNT_INACTIVE', true);
   }
@@ -144,11 +145,11 @@ router.post('/login', loginValidation, handleValidationResult, catchAsync(async 
   
   if (!isPasswordValid) {
     // Increment login attempts
-    await user.incLoginAttempts();
+    await user.incrementLoginAttempts();
     
     logger.logAuth('LOGIN_ATTEMPT', email, false, { 
       reason: 'Invalid password',
-      attempts: user.loginAttempts + 1
+      attempts: user.login_attempts
     }, req);
     
     throw createAppError('Invalid email or password', 401, 'INVALID_CREDENTIALS', true);
@@ -162,7 +163,7 @@ router.post('/login', loginValidation, handleValidationResult, catchAsync(async 
 
   // Log successful login
   logger.logAuth('LOGIN', email, true, { 
-    userId: user._id,
+    userId: user.id,
     role: user.role,
     tokenId: tokens.tokenId,
     sessionId: tokens.sessionId
@@ -198,7 +199,7 @@ router.post('/logout', authenticateToken, auditLog('LOGOUT'), catchAsync(async (
   
   // Log logout event
   logger.logAuth('LOGOUT', req.user.email, true, { 
-    userId: req.user._id,
+    userId: req.user.id,
     tokenId: req.tokenPayload?.tokenId,
     sessionId: req.tokenPayload?.sessionId
   }, req);
@@ -259,19 +260,15 @@ router.post('/oauth/google', authRateLimit, [
     let user = await User.findByEmail(googleUser.email);
     
     if (!user) {
-      user = new User({
+      const randomPassword = crypto.randomBytes(16).toString('hex');
+      user = await User.create({
         email: googleUser.email,
-        name: googleUser.name,
-        picture: googleUser.picture,
-        provider: 'google',
-        emailVerified: googleUser.emailVerified,
-        isActive: true,
+        password: randomPassword,
         role: 'user'
       });
-      await user.save();
       
       logger.logAuth('OAUTH_REGISTER', googleUser.email, true, {
-        userId: user._id,
+        userId: user.id,
         provider: 'google'
       }, req);
     } else {
@@ -283,14 +280,14 @@ router.post('/oauth/google', authRateLimit, [
       }
     }
     
-    if (!user.isActive) {
+    if (!user.is_active) {
       throw createAppError('Account is inactive', 401, 'ACCOUNT_INACTIVE', true);
     }
     
     const tokens = generateTokens(user);
     
     logger.logAuth('OAUTH_LOGIN', googleUser.email, true, {
-      userId: user._id,
+      userId: user.id,
       provider: 'google',
       tokenId: tokens.tokenId
     }, req);
@@ -335,19 +332,15 @@ router.post('/oauth/github', authRateLimit, [
     let user = await User.findByEmail(githubUser.email);
     
     if (!user) {
-      user = new User({
+      const randomPassword = crypto.randomBytes(16).toString('hex');
+      user = await User.create({
         email: githubUser.email,
-        name: githubUser.name,
-        picture: githubUser.picture,
-        provider: 'github',
-        emailVerified: githubUser.emailVerified,
-        isActive: true,
+        password: randomPassword,
         role: 'user'
       });
-      await user.save();
       
       logger.logAuth('OAUTH_REGISTER', githubUser.email, true, {
-        userId: user._id,
+        userId: user.id,
         provider: 'github'
       }, req);
     } else {
@@ -359,14 +352,14 @@ router.post('/oauth/github', authRateLimit, [
       }
     }
     
-    if (!user.isActive) {
+    if (!user.is_active) {
       throw createAppError('Account is inactive', 401, 'ACCOUNT_INACTIVE', true);
     }
     
     const tokens = generateTokens(user);
     
     logger.logAuth('OAUTH_LOGIN', githubUser.email, true, {
-      userId: user._id,
+      userId: user.id,
       provider: 'github',
       tokenId: tokens.tokenId
     }, req);
@@ -395,7 +388,7 @@ router.post('/oauth/github', authRateLimit, [
  */
 router.get('/profile', authenticateToken, catchAsync(async (req, res) => {
   // Fetch fresh user data
-  const user = await User.findById(req.user._id).select('-password');
+  const user = await User.findById(req.user.id);
   
   if (!user) {
     throw createAppError('User not found', 404, 'USER_NOT_FOUND', true);
@@ -429,29 +422,32 @@ router.put('/profile',
   handleValidationResult,
   catchAsync(async (req, res) => {
     const { email } = req.body;
-    const userId = req.user._id;
+    const userId = req.user.id;
 
     // If email is being updated, check if it's already taken
     if (email && email !== req.user.email) {
       const existingUser = await User.findByEmail(email);
-      if (existingUser && existingUser._id.toString() !== userId.toString()) {
+      if (existingUser && existingUser.id !== userId) {
         throw createAppError('Email is already in use', 409, 'EMAIL_EXISTS', true);
       }
     }
 
     // Update user
-    const updatedUser = await User.findByIdAndUpdate(
-      userId,
-      { email },
-      { new: true, runValidators: true }
-    ).select('-password');
+    const user = await User.findById(userId);
+    if (!user) {
+      throw createAppError('User not found', 404, 'USER_NOT_FOUND', true);
+    }
+    if (email) {
+      user.email = email;
+    }
+    const updatedUser = await user.save();
 
     if (!updatedUser) {
       throw createAppError('User not found', 404, 'USER_NOT_FOUND', true);
     }
 
     logger.info('User profile updated', {
-      userId: updatedUser._id,
+      userId: updatedUser.id,
       email: updatedUser.email,
       updatedFields: Object.keys(req.body)
     });
@@ -495,10 +491,10 @@ router.put('/change-password',
   handleValidationResult,
   catchAsync(async (req, res) => {
     const { currentPassword, newPassword } = req.body;
-    const userId = req.user._id;
+    const userId = req.user.id;
 
     // Get user with password
-    const user = await User.findById(userId).select('+password');
+    const user = await User.findById(userId);
     
     if (!user) {
       throw createAppError('User not found', 404, 'USER_NOT_FOUND', true);
@@ -512,11 +508,11 @@ router.put('/change-password',
       throw createAppError('Current password is incorrect', 401, 'INVALID_CURRENT_PASSWORD', true);
     }
 
-    // Update password (will be hashed by pre-save middleware)
-    user.password = newPassword;
+    // Update password by hashing and saving
+    user.password_hash = await bcrypt.hash(newPassword, 12);
     await user.save();
 
-    logger.logAuth('PASSWORD_CHANGE', user.email, true, { userId: user._id }, req);
+    logger.logAuth('PASSWORD_CHANGE', user.email, true, { userId: user.id }, req);
 
     res.json({
       success: true,
