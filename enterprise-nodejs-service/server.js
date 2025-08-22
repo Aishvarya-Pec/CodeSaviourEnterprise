@@ -70,7 +70,7 @@ const performanceRoutes = require('./routes/performance'); // Performance metric
  * In production, missing variables will cause the application to exit.
  * In development, warnings are logged but the app continues to run.
  */
-const requiredEnvVars = ['JWT_SECRET'];
+const requiredEnvVars = ['JWT_SECRET', 'JWT_REFRESH_SECRET'];
 const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
 
 if (missingEnvVars.length > 0) {
@@ -208,7 +208,7 @@ const startServer = async () => {
     // Create default admin user if database is connected
     if (dbConnected && process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
       try {
-        await User.createAdmin(process.env.ADMIN_EMAIL, process.env.ADMIN_PASSWORD);
+        await User.createAdmin({ email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD });
       } catch (error) {
         logger.warn('Could not create admin user:', error.message);
       }
